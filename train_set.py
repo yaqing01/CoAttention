@@ -26,13 +26,14 @@ from tensorflow.python.framework import ops
 from tensorflow.python.ops import weights_broadcast_ops
 from utils import learning_schedules
 from utils import variables_helper
+from utils import utils
 tf.logging.set_verbosity(tf.logging.INFO)
 
 tf.app.flags.DEFINE_string('set', 'train', '')
 tf.app.flags.DEFINE_string('checkpoints_dir', 'model/trained_models', 'pre-trained models')
 tf.app.flags.DEFINE_integer('num_readers', 8, 'Number of threads to preprocess the images.')
-tf.app.flags.DEFINE_integer('batch_size', 50, 'Number of batch_size')
-tf.app.flags.DEFINE_string('dataset_dir','/data/reid_data_large/train/', 'directory of saving the training data')
+tf.app.flags.DEFINE_integer('batch_size', 5, 'Number of batch_size')
+tf.app.flags.DEFINE_string('dataset_dir','/data/reid_data_train_set_extreme_data/train_shuffle/', 'directory of saving the training data')
 tf.app.flags.DEFINE_integer('num_epoches',10, 'Number of epoches for training')
 tf.app.flags.DEFINE_string('train_dir','experiments/dcsl3', 'the experiment name')
 tf.app.flags.DEFINE_string('model','DCSL', 'the model name')
@@ -56,6 +57,7 @@ tf.app.flags.DEFINE_boolean('clone_on_cpu', False,
                      'Force clones to be deployed on CPU.  Note that even if '
                      'set to False (allowing ops to run on gpu), some ops may '
                      'still be run on the CPU if they have no GPU kernel.')
+tf.app.flags.DEFINE_boolean('norm_input', True, 'norm input [-1:1].')
 tf.app.flags.DEFINE_integer('worker_replicas', 1, 'Number of worker+trainer '
                      'replicas.')
 tf.app.flags.DEFINE_integer('ps_tasks', 0,
@@ -63,7 +65,9 @@ tf.app.flags.DEFINE_integer('ps_tasks', 0,
                      'a parameter server.')
 
 tf.app.flags.DEFINE_float('moving_average_decay', None, 'moving_average_decay')
-
+flags.DEFINE_float('last_layer_gradient_multiplier', 1,
+                   'The gradient multiplier for last layers, which is used to '
+                   'boost the gradient of last layers if the value > 1.')
 
 FLAGS = tf.app.flags.FLAGS
 
@@ -72,7 +76,7 @@ os.environ["CUDA_VISIBLE_DEVICES"]=FLAGS.gpu_id
 _FILE_PATTERN = '%s-*'
 
 _SPLITS_TO_SIZES = {
-    'train': 1292196,
+    'train': 1252200,
 }
 
 _ITEMS_TO_DESCRIPTIONS = {
@@ -114,15 +118,15 @@ def get_split(split_name, dataset_dir, file_pattern=None, reader=None):
         reader = tf.TFRecordReader
 
     keys_to_features = {
-      'image/encoded_a': tf.FixedLenFeature((), tf.string, default_value=''),
-      'image/encoded_b': tf.FixedLenFeature((), tf.string, default_value=''),
+      'image/encoded_a': tf.FixedLenFeature((), tf.string),
+      'image/encoded_b': tf.FixedLenFeature((10,), tf.string),
       'image/format': tf.FixedLenFeature((), tf.string, default_value='jpeg'),
       'image/label': tf.FixedLenFeature((), dtype=tf.int64),
     }
 
     items_to_handlers = {
       'image_a': slim.tfexample_decoder.Image('image/encoded_a', 'image/format'),
-      'image_b': slim.tfexample_decoder.Image('image/encoded_b', 'image/format'),  
+      'image_b': slim.tfexample_decoder.Image('image/encoded_b', 'image/format',repeated=True),  
       'label': slim.tfexample_decoder.Tensor('image/label'),
     }
 
@@ -155,6 +159,9 @@ def process_image(image):
     image = tf.expand_dims(distorted_image, 0)
     image = tf.image.resize_bilinear(image, [FLAGS.target_height, FLAGS.target_width], align_corners=False)
     image = tf.squeeze(image, [0])
+    
+    if FLAGS.norm_input:
+        image = tf.divide(image, 255)
     image = tf.subtract(image, 0.5)
     image = tf.multiply(image, 2.0)        
 
@@ -222,35 +229,50 @@ def main(_):
                 num_readers=FLAGS.num_readers,
                 common_queue_capacity=FLAGS.batch_size * 20,
                 common_queue_min=FLAGS.batch_size * 10)
-            [image_a, image_b, label] = provider.get(['image_a','image_b', 'label'])
-            
-            image_a = process_image(image_a)
-            image_b = process_image(image_b)
-            image_a.set_shape([FLAGS.target_height, FLAGS.target_width, 3])
-            image_b.set_shape([FLAGS.target_height, FLAGS.target_width, 3])
-            images_a, images_b, labels = tf.train.batch(
-                [image_a, image_b, label],
+            [image_a, image_b, label] = provider.get(['image_a','image_b','label'])
+            probe = image_a
+            galleries = tf.unstack(image_b)
+
+            galleries_process = []
+ 
+            probe = process_image(probe)
+            probe.set_shape([FLAGS.target_height, FLAGS.target_width, 3])
+
+            for gallery in galleries:
+                gallery = process_image(gallery)
+                gallery.set_shape([FLAGS.target_height, FLAGS.target_width, 3])
+                galleries_process.append(gallery)
+
+            galleries_process = tf.stack(galleries_process)
+
+            probe_batch, galleries_batch, labels = tf.train.batch(
+                [probe, galleries_process, label],
                 batch_size=FLAGS.batch_size,
                 num_threads=8,
                 capacity=FLAGS.batch_size* 10)
 
-            inputs_queue = prefetch_queue([images_a, images_b, labels])
+            inputs_queue = prefetch_queue([probe_batch, galleries_batch, labels])
         
         ######################
         # Select the network #
         ######################
         def model_fn(inputs_queue):
-            images_a, images_b, labels = inputs_queue.dequeue()
+            probe_batch, galleries_batch, labels = inputs_queue.dequeue()
+            probe_batch_tile = tf.tile(tf.expand_dims(probe_batch,axis=1),[1,10,1,1,1])
+            shape = probe_batch_tile.get_shape().as_list()
+            probe_batch_reshape = tf.reshape(probe_batch_tile,[-1,shape[2],shape[3],shape[4]])
+            galleries_batch_reshape = tf.reshape(galleries_batch,[-1,shape[2],shape[3],shape[4]])
+            images_a = probe_batch_reshape
+            images_b = galleries_batch_reshape
+            
             model = find_class_by_name(FLAGS.model, [models])()
-            if 'ContrastiveModel' in FLAGS.model:
-                vec_a,vec_b = model.create_model(images_a, images_b, reuse=False, is_training = True) 
-                contrastive_loss = tf.contrib.losses.metric_learning.contrastive_loss(labels,vec_a,vec_b)
-                tf.losses.add_loss(contrastive_loss)
-            else:
-                
-                logits = model.create_model(images_a, images_b, reuse=False, is_training = True) 
-                label_onehot = tf.one_hot(labels,2)
-                crossentropy_loss = tf.losses.softmax_cross_entropy(onehot_labels=label_onehot,logits=logits)
+
+            logits = model.create_model(images_a, images_b, reuse=False, is_training = True) 
+            logits = tf.reshape(logits,[FLAGS.batch_size,-1])
+            label_onehot = tf.one_hot(labels,10)
+            crossentropy_loss = tf.losses.softmax_cross_entropy(onehot_labels=label_onehot,logits=logits)
+
+            tf.summary.histogram('images_a',images_a)
         clones = model_deploy.create_clones(config, model_fn, [inputs_queue])
         first_clone_scope = clones[0].scope
 
@@ -270,7 +292,7 @@ def main(_):
         #########################################
         with tf.device(config.optimizer_device()):
                   
-            learning_rate_step_boundaries = [int(num_batches_epoch*num_epoches*0.50), int(num_batches_epoch*num_epoches*0.75), int(num_batches_epoch*num_epoches*0.90)]
+            learning_rate_step_boundaries = [int(num_batches_epoch*num_epoches*0.50), int(num_batches_epoch*num_epoches*0.65), int(num_batches_epoch*num_epoches*0.80)]
             learning_rate_sequence = [FLAGS.learning_rate]
             learning_rate_sequence += [FLAGS.learning_rate*0.1, FLAGS.learning_rate*0.01, FLAGS.learning_rate*0.001]
             learning_rate = learning_schedules.manual_stepping(
@@ -289,7 +311,7 @@ def main(_):
         update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, first_clone_scope)
         with tf.device(config.optimizer_device()):
             training_optimizer = opt
-    
+        
 
         
         
@@ -336,102 +358,41 @@ def main(_):
                 init_saver.restore(sess, FLAGS.weights)
             init_fn = initializer_fn  
             
-        if FLAGS.model=='CoAttention':
+        if FLAGS.model=='MultiHeadAttentionBaseModel_set':
             if FLAGS.weights is None:
                 # if not FLAGS.moving_average_decay:
                 variables = slim.get_model_variables('InceptionV1')
                 init_fn = slim.assign_from_checkpoint_fn(
                     os.path.join(FLAGS.checkpoints_dir, 'inception_v1.ckpt'),
                     slim.get_model_variables('InceptionV1'))
-        if FLAGS.model=='AttentionBaseModel':
+            else: 
+                restore_var = [v for v in slim.get_model_variables() if 'Score' not in v.name]
+                init_fn = slim.assign_from_checkpoint_fn(FLAGS.weights,restore_var)   
+        if FLAGS.model=='MultiHeadAttentionBaseModel_set_share':
             if FLAGS.weights is None:
                 # if not FLAGS.moving_average_decay:
                 variables = slim.get_model_variables('InceptionV1')
                 init_fn = slim.assign_from_checkpoint_fn(
                     os.path.join(FLAGS.checkpoints_dir, 'inception_v1.ckpt'),
                     slim.get_model_variables('InceptionV1'))
-        if FLAGS.model=='CoAttentionBaseModel':
-            if FLAGS.weights is None:
-                # if not FLAGS.moving_average_decay:
-                variables = slim.get_model_variables('InceptionV1')
-                init_fn = slim.assign_from_checkpoint_fn(
-                    os.path.join(FLAGS.checkpoints_dir, 'inception_v1.ckpt'),
-                    slim.get_model_variables('InceptionV1'))
+            else: 
+                restore_var = [v for v in slim.get_model_variables() if 'Score' not in v.name]
+                init_fn = slim.assign_from_checkpoint_fn(FLAGS.weights,restore_var)   
                 
-        if FLAGS.model=='MultiHeadCoAttention':
+        if FLAGS.model=='MultiHeadAttentionBaseModel_set_share_res50':
             if FLAGS.weights is None:
                 # if not FLAGS.moving_average_decay:
-                variables = slim.get_model_variables('InceptionV1')
+                variables = slim.get_model_variables('resnet_v2_50')
                 init_fn = slim.assign_from_checkpoint_fn(
-                    os.path.join(FLAGS.checkpoints_dir, 'inception_v1.ckpt'),
-                    slim.get_model_variables('InceptionV1'))
-        if FLAGS.model=='MultiHeadAttentionBaseModel':
-            if FLAGS.weights is None:
-                # if not FLAGS.moving_average_decay:
-                variables = slim.get_model_variables('InceptionV1')
-                init_fn = slim.assign_from_checkpoint_fn(
-                    os.path.join(FLAGS.checkpoints_dir, 'inception_v1.ckpt'),
-                    slim.get_model_variables('InceptionV1'))
-        if FLAGS.model=='MultiHeadAttentionBaseModel_fixed':
-            if FLAGS.weights is None:
-                # if not FLAGS.moving_average_decay:
-                variables = slim.get_model_variables('InceptionV1')
-                init_fn = slim.assign_from_checkpoint_fn(
-                    os.path.join(FLAGS.checkpoints_dir, 'inception_v1.ckpt'),
-                    slim.get_model_variables('InceptionV1'))
-        if FLAGS.model=='MultiHeadAttentionBaseModel_res':
-            if FLAGS.weights is None:
-                # if not FLAGS.moving_average_decay:
-                variables = slim.get_model_variables('InceptionV1')
-                init_fn = slim.assign_from_checkpoint_fn(
-                    os.path.join(FLAGS.checkpoints_dir, 'inception_v1.ckpt'),
-                    slim.get_model_variables('InceptionV1'))
-                
-        if FLAGS.model=='CoAttentionBaseModel_v2':
-            if FLAGS.weights is None:
-                # if not FLAGS.moving_average_decay:
-                variables = slim.get_model_variables('InceptionV1')
-                init_fn = slim.assign_from_checkpoint_fn(
-                    os.path.join(FLAGS.checkpoints_dir, 'inception_v1.ckpt'),
-                    slim.get_model_variables('InceptionV1'))
-                
-        if 'ParallelAttentionBaseModel' in FLAGS.model:
-            if FLAGS.weights is None:
-                # if not FLAGS.moving_average_decay:
-                variables = slim.get_model_variables('InceptionV1')
-                init_fn = slim.assign_from_checkpoint_fn(
-                    os.path.join(FLAGS.checkpoints_dir, 'inception_v1.ckpt'),
-                    slim.get_model_variables('InceptionV1'))
-        if 'ContrastiveModel' in FLAGS.model:
-            if FLAGS.weights is None:
-                # if not FLAGS.moving_average_decay:
-                variables = slim.get_model_variables('InceptionV1')
-                init_fn = slim.assign_from_checkpoint_fn(
-                    os.path.join(FLAGS.checkpoints_dir, 'inception_v1.ckpt'),
-                    slim.get_model_variables('InceptionV1'))
-                
-        if FLAGS.model=='MultiHeadCoAttention_inv4':
-            if FLAGS.weights is None:
-                # if not FLAGS.moving_average_decay:
-                variables = slim.get_model_variables('InceptionV4')
-                init_fn = slim.assign_from_checkpoint_fn(
-                    os.path.join(FLAGS.checkpoints_dir, 'inception_v4.ckpt'),
-                    slim.get_model_variables('InceptionV4'))
-        if FLAGS.model=='MultiLayerMultiHeadCoAttention':
-            if FLAGS.weights is None:
-                # if not FLAGS.moving_average_decay:
-                variables = slim.get_model_variables('InceptionV1')
-                init_fn = slim.assign_from_checkpoint_fn(
-                    os.path.join(FLAGS.checkpoints_dir, 'inception_v1.ckpt'),
-                    slim.get_model_variables('InceptionV1'))
-        if FLAGS.model=='DCSL_inception_v4':
-            if FLAGS.weights is None:
-                # if not FLAGS.moving_average_decay:
-                variables = slim.get_model_variables('InceptionV4')
-                init_fn = slim.assign_from_checkpoint_fn(
-                    os.path.join(FLAGS.checkpoints_dir, 'inception_v4.ckpt'),
-                    slim.get_model_variables('InceptionV4'))
-                
+                    os.path.join(FLAGS.checkpoints_dir, 'resnet_v2_50.ckpt'),
+                    slim.get_model_variables('resnet_v2_50'))   
+        if FLAGS.model=='MultiHeadAttentionBaseModel_set_inv3':
+            # if not FLAGS.moving_average_decay:
+            variables = slim.get_model_variables('InceptionV3')
+            init_fn = slim.assign_from_checkpoint_fn(
+                os.path.join(FLAGS.checkpoints_dir, 'inception_v3.ckpt'),
+                slim.get_model_variables('InceptionV3'))
+            
         # compute and update gradients
         with tf.device(config.optimizer_device()):
             if FLAGS.moving_average_decay:
@@ -442,7 +403,9 @@ def main(_):
 
             #  and returns a train_tensor and summary_op
             total_loss, grads_and_vars = model_deploy.optimize_clones(clones, training_optimizer, regularization_losses=None, var_list=all_trainable)
-
+            
+            grad_mult = utils.get_model_gradient_multipliers(FLAGS.last_layer_gradient_multiplier)
+            grads_and_vars = slim.learning.multiply_gradients(grads_and_vars, grad_mult)
             # Optionally clip gradients
             # with tf.name_scope('clip_grads'):
             #     grads_and_vars = slim.learning.clip_gradient_norms(grads_and_vars, 10)

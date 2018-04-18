@@ -15,6 +15,7 @@ from tensorflow.contrib import slim
 import tqdm
 import os
 from nets import inception
+from nets import resnet_v2
 from preprocessing import inception_preprocessing
 from tensorflow import app
 from tensorflow import flags
@@ -82,6 +83,64 @@ class FeatureExtractor_inv1:
                         self.reuse = True
 
         return feature_map
+    
+class FeatureExtractor_inv3:
+    
+    def __init__(self, reuse=False):
+        self.reuse = reuse
+
+    def __call__(self, image_input, training=False, keep_prob=1.0, endpoint_name = 'Mixed_6e'):
+        weight_decay=FLAGS.weight_decay
+        activation_fn=tf.nn.relu 
+            
+        end_points = {}
+        with slim.arg_scope(inception.inception_v3_arg_scope(weight_decay=FLAGS.weight_decay)):
+            with tf.variable_scope("", reuse=self.reuse):
+                with tf.variable_scope(None, 'InceptionV3', [image_input]) as scope:
+                    with slim.arg_scope([slim.batch_norm, slim.dropout], is_training=training):
+                        net, end_points = inception.inception_v3_base(image_input, scope=scope)
+                        feature_map = end_points[endpoint_name]
+                        self.reuse = True
+                        
+        return feature_map
+
+class FeatureExtractor_inv4:
+    
+    def __init__(self, reuse=False):
+        self.reuse = reuse
+
+    def __call__(self, image_input, training=False, keep_prob=1.0, endpoint_name = 'Mixed_7d'):
+        weight_decay=FLAGS.weight_decay
+        activation_fn=tf.nn.relu 
+            
+        end_points = {}
+        with slim.arg_scope(inception.inception_v4_arg_scope(weight_decay=FLAGS.weight_decay)):
+            with tf.variable_scope("", reuse=self.reuse):
+                with tf.variable_scope(None, 'InceptionV4', [image_input]) as scope:
+                    with slim.arg_scope([slim.batch_norm, slim.dropout], is_training=training):
+                        net, end_points = inception.inception_v4_base(image_input, scope=scope)
+                        feature_map = end_points[endpoint_name]
+
+                        self.reuse = True
+
+        return feature_map
+    
+class FeatureExtractor_res50:
+    
+    def __init__(self, reuse=False):
+        self.reuse = reuse
+
+    def __call__(self, image_input,reuse=False, training=False, keep_prob=1.0, endpoint_name = 'Mixed_7d'):
+        weight_decay=FLAGS.weight_decay
+        activation_fn=tf.nn.relu 
+            
+        end_points = {}
+        with slim.arg_scope(resnet_v2.resnet_arg_scope(weight_decay=weight_decay)):
+            with tf.variable_scope("", reuse=reuse):
+                net, end_points = resnet_v2.resnet_v2_50(image_input,is_training=training, global_pool=False)
+                print(net.shape)
+        return net
+    
 class FeatureExtractor_nas:
     
     def __init__(self, reuse=False):

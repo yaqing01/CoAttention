@@ -67,6 +67,7 @@ tf.app.flags.DEFINE_integer('ps_tasks', 0,
 
 tf.app.flags.DEFINE_float('moving_average_decay', None, 'moving_average_decay')
 tf.app.flags.DEFINE_integer('num_heads', 8, 'the number of heads')
+tf.app.flags.DEFINE_boolean('norm_input', True, 'norm input [-1:1].')
 
 FLAGS = tf.app.flags.FLAGS
 
@@ -154,6 +155,9 @@ def process_image(image):
     image = tf.expand_dims(image, 0)
     image = tf.image.resize_bilinear(image, [FLAGS.target_height, FLAGS.target_width], align_corners=False)
     image = tf.squeeze(image, [0])
+    
+    if FLAGS.norm_input:
+        image = tf.divide(image, 255)
     image = tf.subtract(image, 0.5)
     image = tf.multiply(image, 2.0)  
     return image
@@ -215,8 +219,21 @@ def main(_):
 
         probe_batch = tf.expand_dims(probe_batch,0)
         probe_batch = tf.tile(probe_batch,[100,1,1,1])
-        logits = model.create_model(probe_batch, galleries_batch, reuse=False, is_training = False) 
         
+
+        logits = model.create_model(probe_batch, galleries_batch, reuse=False, is_training = False) 
+        tf.summary.histogram('probe_batch',probe_batch)
+        
+        if logits.get_shape().as_list()[1] == 2:
+            predictions = tf.argmax(logits, 0)
+            predictions = tf.slice(predictions, [1],[1])
+            predictions = tf.squeeze(predictions)
+        else:
+            predictions = tf.argmax(logits, 0)
+            predictions = tf.squeeze(predictions)
+
+        labels = tf.squeeze(labels)
+            
 
         if FLAGS.moving_average_decay:
             moving_average_variables = slim.get_model_variables()
@@ -226,11 +243,7 @@ def main(_):
             moving_average_variables, variable_averages = None, None
         variables_to_restore = slim.get_variables_to_restore()
             
-        predictions = tf.argmax(logits, 0)
-        predictions = tf.slice(predictions, [1],[1])
-        predictions = tf.squeeze(predictions)
 
-        labels = tf.squeeze(labels)
         
         # Define the metrics:
         names_to_values, names_to_updates = slim.metrics.aggregate_metric_map({
