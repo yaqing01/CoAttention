@@ -68,7 +68,7 @@ tf.app.flags.DEFINE_integer('ps_tasks', 0,
 tf.app.flags.DEFINE_float('moving_average_decay', None, 'moving_average_decay')
 tf.app.flags.DEFINE_integer('num_heads', 8, 'the number of heads')
 tf.app.flags.DEFINE_boolean('norm_input', True, 'norm input [-1:1].')
-
+tf.app.flags.DEFINE_boolean('eval_once', False, 'eval once or not')
 FLAGS = tf.app.flags.FLAGS
 
 os.environ["CUDA_VISIBLE_DEVICES"]=FLAGS.gpu_id
@@ -261,10 +261,11 @@ def main(_):
         num_samples = _SPLITS_TO_SIZES[FLAGS.set]
         num_batches = math.ceil(num_samples/float(FLAGS.batch_size))    
         
-        if FLAGS.eval_weight is not None:
+        if FLAGS.eval_once is True:
+            eval_weight = tf.train.latest_checkpoint(FLAGS.train_dir)
             slim.evaluation.evaluate_once(
                 FLAGS.master,
-                FLAGS.eval_weight,
+                eval_weight,
                 eval_dir,
                 num_evals=num_batches,
                 eval_op=list(names_to_updates.values()),

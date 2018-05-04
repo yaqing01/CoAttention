@@ -47,7 +47,7 @@ def Attention(Q,K,V):
     softmax_attention = tf.nn.softmax(dot_product)
     attention_value = tf.matmul(softmax_attention,V)
 
-    return attention_value
+    return attention_value,softmax_attention
 def add_timing_signal_nd(x, min_timescale=1.0, max_timescale=1.0e4):
     """Adds a bunch of sinusoids of different frequencies to a Tensor.
     Each channel of the input Tensor is incremented by a sinusoid of a different
@@ -93,3 +93,34 @@ def add_timing_signal_nd(x, min_timescale=1.0, max_timescale=1.0e4):
             signal = tf.expand_dims(signal, -2)
         x += signal
     return x
+
+def get_model_gradient_multipliers(last_layer_gradient_multiplier):
+    """Gets the gradient multipliers.
+    The gradient multipliers will adjust the learning rates for model
+    variables. For the task of semantic segmentation, the models are
+    usually fine-tuned from the models trained on the task of image
+    classification. To fine-tune the models, we usually set larger (e.g.,
+    10 times larger) learning rate for the parameters of last layer.
+    Args:
+    last_layers: Scopes of last layers.
+    last_layer_gradient_multiplier: The gradient multiplier for last layers.
+    Returns:
+    The gradient multiplier map with variables as key, and multipliers as value.
+    """
+    gradient_multipliers = {}
+
+    for var in slim.get_model_variables():
+        # Double the learning rate for biases.
+        if 'biases' in var.op.name:
+            gradient_multipliers[var.op.name] = 2.
+
+        # Use larger learning rate for last layer variables.
+        if 'Score' in var.op.name:
+            if 'biases' in var.op.name:
+                gradient_multipliers[var.op.name] = 2 * last_layer_gradient_multiplier
+                print(var.op.name)
+            elif 'weights' in var.op.name:
+                gradient_multipliers[var.op.name] = last_layer_gradient_multiplier
+                print(var.op.name)
+
+    return gradient_multipliers

@@ -110,7 +110,7 @@ class MatchNetwork:
                     net = slim.dropout(net, 0.40, scope='Dropout_match',is_training=training)
                     net = slim.fully_connected(net, 1024, activation_fn=tf.nn.relu, scope='Match_Prelogits2')
                     net = slim.dropout(net, 0.40, scope='Dropout_match',is_training=training)
-                    net = slim.fully_connected(net, 2, activation_fn=None, scope='Match_logits')
+                    net = slim.fully_connected(net, 1, activation_fn=None, scope='Match_logits')
                     self.reuse=True
         return net
     

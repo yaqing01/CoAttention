@@ -49,7 +49,7 @@ def exponential_decay_with_burnin(global_step,
       global_step,
       learning_rate_decay_steps,
       learning_rate_decay_factor,
-      staircase=True)
+      staircase=False)
   return tf.cond(
       tf.less(global_step, burnin_steps),
       lambda: tf.convert_to_tensor(burnin_learning_rate),
