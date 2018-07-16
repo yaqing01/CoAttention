@@ -98,7 +98,7 @@ class ClassificationBlock:
     def __init__(self, reuse=False):
         self.reuse = reuse
 
-    def __call__(self, net, training=False, scope = ""):
+    def __call__(self, net, training=False, scope = "",num_classes=2):
         with slim.arg_scope(inception.inception_resnet_v2_arg_scope(use_batch_norm=True,weight_decay=FLAGS.weight_decay)):
             with tf.variable_scope(scope, reuse=self.reuse):
                 with slim.arg_scope([slim.batch_norm, slim.dropout],is_training=training):
@@ -109,7 +109,7 @@ class ClassificationBlock:
                     net = slim.dropout(net, 0.50, scope='Dropout_match',is_training=training)
                     net = slim.fully_connected(net, 1024, activation_fn=tf.nn.relu, scope='Match_Prelogits2')
                     net = slim.dropout(net, 0.50, scope='Dropout_match',is_training=training)
-                    net = slim.fully_connected(net, 2, activation_fn=None, scope='Match_logits')
+                    net = slim.fully_connected(net, num_classes, activation_fn=None, normalizer_fn = None, scope='Match_logits')
                     
             self.reuse=True
         return net
@@ -254,7 +254,60 @@ class MultiHeadAttentionBlock_v2:
                     attentions = tf.stack(attentions,axis=1)
 #                     heads = slim.fully_connected(heads, d_model) 
         return heads,attentions
+class MultiHeadAttentionBlock_MM:
+    def __init__(self, reuse=False):
+        self.reuse = reuse
 
+    def __call__(self, Q, K, V, num_heads, training=False,evaluation=False,reuse=False, scope = ""):
+        """
+        This module calculates the cosine distance between each of the support set embeddings and the target
+        image embeddings.
+        :param support_set: The embeddings of the support set images, tensor of shape [sequence_length, batch_size, 64]
+        :param input_image: The embedding of the target image, tensor of shape [batch_size, 64]
+        :param name: Name of the op to appear on the graph
+        :param training: Flag indicating training or evaluation (True/False)
+        :return: A tensor with cosine similarities of shape [batch_size, sequence_length, 1]
+        """
+        
+        d_model = Q.get_shape().as_list()[-1]
+        d_key = d_model / num_heads
+        d_value = d_model / num_heads
+        
+        heads = []
+
+        attentions = []
+            
+        with slim.arg_scope(inception.inception_resnet_v2_arg_scope(use_batch_norm=True,weight_decay=FLAGS.weight_decay)):
+            with tf.variable_scope(scope, reuse=reuse):
+                with slim.arg_scope([slim.batch_norm, slim.dropout],is_training=training):
+                    
+                    for HeadIdx in range(num_heads):
+                        with tf.variable_scope('Query', reuse=False):
+                            query = slim.conv2d(Q, d_key, [1, 1], scope='QueryRep-'+str(HeadIdx))
+                            query = slim.conv2d(query, d_key, [3, 3],scope='QueryRepb-'+str(HeadIdx), padding='SAME', )
+    #                             activation_fn = None, normalizer_fn=None, normalizer_params=None)
+                            query = tf.reshape(query,[query.get_shape().as_list()[0],-1,query.get_shape().as_list()[3]])
+                        with tf.variable_scope('Query', reuse=True):
+                            key = slim.conv2d(K, d_key, [1, 1], scope='QueryRep-'+str(HeadIdx))
+                            key = slim.conv2d(key, d_key, [3, 3],scope='QueryRepb-'+str(HeadIdx), padding='SAME', )
+    #                             activation_fn = None, normalizer_fn=None, normalizer_params=None)
+                            key = tf.reshape(key,[key.get_shape().as_list()[0],-1,key.get_shape().as_list()[3]])
+                        with tf.variable_scope('Query', reuse=True):
+                            value = slim.conv2d(V, d_key, [1, 1], scope='QueryRep-'+str(HeadIdx))
+                            value = slim.conv2d(value, d_key, [3, 3],scope='QueryRepb-'+str(HeadIdx), padding='SAME', )
+    #                             activation_fn = None, normalizer_fn=None, normalizer_params=None)
+                            value = tf.reshape(value,[value.get_shape().as_list()[0],-1,value.get_shape().as_list()[3]])
+                        
+                        head,attention = Attention(query,key,value)
+                        
+                        heads.append(head)
+                        attentions.append(attention)
+                        
+
+                    heads = tf.concat(heads,axis=2)
+                    attentions = tf.stack(attentions,axis=1)
+#                     heads = slim.fully_connected(heads, d_model) 
+        return heads,attentions
 class MultiHeadAttentionBlock_softmatch:
     def __init__(self, reuse=False):
         self.reuse = reuse
@@ -545,6 +598,8 @@ class MultiHeadAttentionBaseModel_res(BaseModel):
         feat_map_a = fn_extraction(input_a,training=is_training, endpoint_name = 'Mixed_4f')
         feat_map_b = fn_extraction(input_b,training=is_training, endpoint_name = 'Mixed_4f')
         
+        
+        
         feat_map_a = stem_block(feat_map_a,embedding_length,training=is_training, reuse=False, scope='stem_embedding')
         feat_map_b = stem_block(feat_map_b,embedding_length,training=is_training, reuse=True, scope='stem_embedding')
         
@@ -711,6 +766,7 @@ class MultiHeadAttentionBaseModel_set_share(BaseModel):
         
         feat_map_a = fn_extraction(input_a,training=is_training, endpoint_name = 'Mixed_4f')
         feat_map_b = fn_extraction(input_b,training=is_training, endpoint_name = 'Mixed_4f')
+        print(feat_map_a.shape)
         
         feat_map_a = stem_block(feat_map_a,embedding_length, training=is_training, use_atrous=FLAGS.use_atrous, scope='stem_embedding')
         feat_map_b = stem_block(feat_map_b,embedding_length, training=is_training, use_atrous=FLAGS.use_atrous, scope='stem_embedding')
@@ -782,6 +838,187 @@ class MultiHeadAttentionBaseModel_set_share(BaseModel):
             attentions.append(attentions_4)
             return score,attentions 
         
+class MultiHeadAttentionBaseModel_set_share_classify(BaseModel):
+    def create_model(self, input_a, input_b, reuse, is_training=True,is_evaluation=False, **unused_params):
+        
+        fn_extraction = FeatureExtractor_inv1(reuse = reuse)
+        stem_block = StemBlock(reuse = reuse)
+        attention_block = AttentionBlock(reuse = reuse)
+        query_block = QueryBlock(reuse = reuse)
+        compare_block = CompareBlock(reuse = reuse)
+        score_block = ScoreBlock(reuse = reuse)
+        fn_coattention = MultiHeadAttentionBlock_v2(reuse = reuse)
+        classify_block = ClassificationBlock(reuse = reuse)
+        
+        embedding_length = FLAGS.feature_dim
+        
+        feat_map_a = fn_extraction(input_a,training=is_training, endpoint_name = 'Mixed_4f')
+        feat_map_b = fn_extraction(input_b,training=is_training, endpoint_name = 'Mixed_4f')
+        
+
+        
+        feat_map_a = stem_block(feat_map_a,embedding_length, training=is_training, use_atrous=FLAGS.use_atrous, scope='stem_embedding')
+        feat_map_b = stem_block(feat_map_b,embedding_length, training=is_training, use_atrous=FLAGS.use_atrous, scope='stem_embedding')
+        
+        feat_map_b_ave = tf.reduce_mean(feat_map_b,axis=1)
+        feat_map_b_ave = tf.reduce_mean(feat_map_b_ave,axis=1)
+        class_score = classify_block(feat_map_b_ave,training=is_training,scope='CLASS', num_classes=751)
+        
+        print(feat_map_b_ave.shape) 
+        print(class_score.shape)
+        
+        print(feat_map_a.shape)
+        # location embedding
+        if FLAGS.use_pe:
+            feat_map_a = add_timing_signal_nd(feat_map_a)
+            feat_map_b = add_timing_signal_nd(feat_map_b)
+        
+        # ATTENTION
+        A2AAtt,attentions_1 = fn_coattention(feat_map_a,feat_map_a,feat_map_a,FLAGS.num_heads,
+                                             training=is_training,evaluation=is_evaluation,scope='CoAtt1')
+        A2BAtt,attentions_2 = fn_coattention(feat_map_a,feat_map_b,feat_map_b,FLAGS.num_heads,
+                                             training=is_training,evaluation=is_evaluation,reuse=True, scope='CoAtt1')
+        
+        A2AAtt = tf.reshape(A2AAtt, [feat_map_a.get_shape()[0],feat_map_a.get_shape()[1],feat_map_a.get_shape()[2],-1])
+        A2BAtt = tf.reshape(A2BAtt, [feat_map_a.get_shape()[0],feat_map_a.get_shape()[1],feat_map_a.get_shape()[2],-1])
+        # COMPARE
+        compare_map_ab = compare_block(A2AAtt,A2BAtt,training=is_training,scope='compare',reuse=False)
+
+        # ATTENTION, reuse = True
+        B2BAtt,attentions_3 = fn_coattention(feat_map_b,feat_map_b,feat_map_b,FLAGS.num_heads,
+                                             training=is_training,evaluation=is_evaluation,reuse=True, scope='CoAtt1')
+        B2AAtt,attentions_4 = fn_coattention(feat_map_b,feat_map_a,feat_map_a,FLAGS.num_heads,
+                                             training=is_training,evaluation=is_evaluation,reuse=True, scope='CoAtt1')
+        
+        B2BAtt = tf.reshape(B2BAtt, [feat_map_a.get_shape()[0],feat_map_a.get_shape()[1],feat_map_a.get_shape()[2],-1])
+        B2AAtt = tf.reshape(B2AAtt, [feat_map_a.get_shape()[0],feat_map_a.get_shape()[1],feat_map_a.get_shape()[2],-1])
+        # COMPARE
+        compare_map_ba = compare_block(B2BAtt,B2AAtt,training=is_training,scope='compare',reuse=True)   
+        
+
+        # Compare Final
+        compmap = compare_block(compare_map_ab,compare_map_ba,training=is_training,scope='compare-final',reuse=False)  
+        score = score_block(compmap,training=is_training)
+        
+        # summary
+        
+
+
+        
+        if not is_evaluation:
+            attentions_1 = tf.reshape(attentions_1, [attentions_1.get_shape()[0],attentions_1.get_shape()[1],attentions_1.get_shape()[2],feat_map_a.get_shape()[1],feat_map_a.get_shape()[2] ])
+            slice_a = tf.slice(attentions_1, [0,0,31,0,0],[-1,1,1,-1,-1])
+            slice_a = tf.squeeze(slice_a)
+            tf.summary.image('attentions_5_3_1_a',tf.expand_dims(slice_a,axis=3))
+            slice_a = tf.slice(attentions_1, [0,0,39,0,0],[-1,1,1,-1,-1])
+            slice_a = tf.squeeze(slice_a)
+            tf.summary.image('attentions_6_4_1_a',tf.expand_dims(slice_a,axis=3))
+
+            attentions_2 = tf.reshape(attentions_2, [attentions_2.get_shape()[0],attentions_2.get_shape()[1],attentions_2.get_shape()[2],feat_map_a.get_shape()[1],feat_map_a.get_shape()[2] ])
+
+            slice_a = tf.slice(attentions_2, [0,0,31,0,0],[-1,1,1,-1,-1])
+            slice_a = tf.squeeze(slice_a)
+            tf.summary.image('attentions_5_3_1_b',tf.expand_dims(slice_a,axis=3))
+            slice_a = tf.slice(attentions_2, [0,0,39,0,0],[-1,1,1,-1,-1])
+            slice_a = tf.squeeze(slice_a)
+            tf.summary.image('attentions_6_4_1_b',tf.expand_dims(slice_a,axis=3))
+
+            tf.summary.image('feat_map_a',tf.subtract(tf.multiply(input_a, 0.5),-0.5))
+            tf.summary.image('feat_map_b',tf.subtract(tf.multiply(input_b, 0.5),-0.5))
+            return score, class_score
+        else:
+            attentions = []
+            attentions.append(attentions_1)
+            attentions.append(attentions_2)
+            attentions.append(attentions_3)
+            attentions.append(attentions_4)
+            return score,attentions 
+class MultiHeadAttentionBaseModel_set_share_softmax(BaseModel):
+    def create_model(self, input_a, input_b, reuse, is_training=True,is_evaluation=False, **unused_params):
+        
+        fn_extraction = FeatureExtractor_inv1(reuse = reuse)
+        stem_block = StemBlock(reuse = reuse)
+        attention_block = AttentionBlock(reuse = reuse)
+        query_block = QueryBlock(reuse = reuse)
+        compare_block = CompareBlock(reuse = reuse)
+        score_block = ClassificationBlock(reuse = reuse)
+        fn_coattention = MultiHeadAttentionBlock_v2(reuse = reuse)
+        
+        embedding_length = FLAGS.feature_dim
+        
+        feat_map_a = fn_extraction(input_a,training=is_training, endpoint_name = 'Mixed_4f')
+        feat_map_b = fn_extraction(input_b,training=is_training, endpoint_name = 'Mixed_4f')
+        print(feat_map_a.shape)
+        
+        feat_map_a = stem_block(feat_map_a,embedding_length, training=is_training, use_atrous=FLAGS.use_atrous, scope='stem_embedding')
+        feat_map_b = stem_block(feat_map_b,embedding_length, training=is_training, use_atrous=FLAGS.use_atrous, scope='stem_embedding')
+        
+        print(feat_map_a.shape)
+        # location embedding
+        if FLAGS.use_pe:
+            feat_map_a = add_timing_signal_nd(feat_map_a)
+            feat_map_b = add_timing_signal_nd(feat_map_b)
+        
+        # ATTENTION
+        A2AAtt,attentions_1 = fn_coattention(feat_map_a,feat_map_a,feat_map_a,FLAGS.num_heads,
+                                             training=is_training,evaluation=is_evaluation,scope='CoAtt1')
+        A2BAtt,attentions_2 = fn_coattention(feat_map_a,feat_map_b,feat_map_b,FLAGS.num_heads,
+                                             training=is_training,evaluation=is_evaluation,reuse=True, scope='CoAtt1')
+        
+        A2AAtt = tf.reshape(A2AAtt, [feat_map_a.get_shape()[0],feat_map_a.get_shape()[1],feat_map_a.get_shape()[2],-1])
+        A2BAtt = tf.reshape(A2BAtt, [feat_map_a.get_shape()[0],feat_map_a.get_shape()[1],feat_map_a.get_shape()[2],-1])
+        # COMPARE
+        compare_map_ab = compare_block(A2AAtt,A2BAtt,training=is_training,scope='compare',reuse=False)
+
+        # ATTENTION, reuse = True
+        B2BAtt,attentions_3 = fn_coattention(feat_map_b,feat_map_b,feat_map_b,FLAGS.num_heads,
+                                             training=is_training,evaluation=is_evaluation,reuse=True, scope='CoAtt1')
+        B2AAtt,attentions_4 = fn_coattention(feat_map_b,feat_map_a,feat_map_a,FLAGS.num_heads,
+                                             training=is_training,evaluation=is_evaluation,reuse=True, scope='CoAtt1')
+        
+        B2BAtt = tf.reshape(B2BAtt, [feat_map_a.get_shape()[0],feat_map_a.get_shape()[1],feat_map_a.get_shape()[2],-1])
+        B2AAtt = tf.reshape(B2AAtt, [feat_map_a.get_shape()[0],feat_map_a.get_shape()[1],feat_map_a.get_shape()[2],-1])
+        # COMPARE
+        compare_map_ba = compare_block(B2BAtt,B2AAtt,training=is_training,scope='compare',reuse=True)   
+        
+
+        # Compare Final
+        compmap = compare_block(compare_map_ab,compare_map_ba,training=is_training,scope='compare-final',reuse=False)  
+        score = score_block(compmap,training=is_training)
+        
+        # summary
+        
+
+
+        
+        if not is_evaluation:
+            attentions_1 = tf.reshape(attentions_1, [attentions_1.get_shape()[0],attentions_1.get_shape()[1],attentions_1.get_shape()[2],feat_map_a.get_shape()[1],feat_map_a.get_shape()[2] ])
+            slice_a = tf.slice(attentions_1, [0,0,31,0,0],[-1,1,1,-1,-1])
+            slice_a = tf.squeeze(slice_a)
+            tf.summary.image('attentions_5_3_1_a',tf.expand_dims(slice_a,axis=3))
+            slice_a = tf.slice(attentions_1, [0,0,39,0,0],[-1,1,1,-1,-1])
+            slice_a = tf.squeeze(slice_a)
+            tf.summary.image('attentions_6_4_1_a',tf.expand_dims(slice_a,axis=3))
+
+            attentions_2 = tf.reshape(attentions_2, [attentions_2.get_shape()[0],attentions_2.get_shape()[1],attentions_2.get_shape()[2],feat_map_a.get_shape()[1],feat_map_a.get_shape()[2] ])
+
+            slice_a = tf.slice(attentions_2, [0,0,31,0,0],[-1,1,1,-1,-1])
+            slice_a = tf.squeeze(slice_a)
+            tf.summary.image('attentions_5_3_1_b',tf.expand_dims(slice_a,axis=3))
+            slice_a = tf.slice(attentions_2, [0,0,39,0,0],[-1,1,1,-1,-1])
+            slice_a = tf.squeeze(slice_a)
+            tf.summary.image('attentions_6_4_1_b',tf.expand_dims(slice_a,axis=3))
+
+            tf.summary.image('feat_map_a',tf.subtract(tf.multiply(input_a, 0.5),-0.5))
+            tf.summary.image('feat_map_b',tf.subtract(tf.multiply(input_b, 0.5),-0.5))
+            return score
+        else:
+            attentions = []
+            attentions.append(attentions_1)
+            attentions.append(attentions_2)
+            attentions.append(attentions_3)
+            attentions.append(attentions_4)
+            return score,attentions 
 class CompareKeyBlock:
     def __init__(self, reuse=False):
         self.reuse = reuse

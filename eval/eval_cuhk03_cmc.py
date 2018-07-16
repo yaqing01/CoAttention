@@ -77,6 +77,7 @@ tf.app.flags.DEFINE_string('gpu_id',"4", 'gpu id')
 tf.app.flags.DEFINE_integer('num_heads', 4, 'the number of heads')
 tf.app.flags.DEFINE_float('weight_decay', 0.0002, 'weight_decay')
 tf.app.flags.DEFINE_integer('rand_times', 10, 'random times for testing')
+tf.app.flags.DEFINE_integer('set_no', 1, 'random times for testing')
 FLAGS = tf.app.flags.FLAGS
 
 remaining_args = FLAGS([sys.argv[0]] + [flag for flag in sys.argv if flag.startswith("--")])
@@ -86,7 +87,7 @@ os.environ["CUDA_VISIBLE_DEVICES"]=FLAGS.gpu_id
 HNM = 0
 
 
-set_no = 1
+set_no =FLAGS.set_no
     
 # sess = tf.Session("", graph=graph)
 # saver.restore(sess,'../experiments_set/coattention_set_scratch_30epoch/model.ckpt-876881')

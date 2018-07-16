@@ -61,6 +61,11 @@ tf.app.flags.DEFINE_integer('worker_replicas', 1, 'Number of worker+trainer '
 tf.app.flags.DEFINE_integer('ps_tasks', 0,
                      'Number of parameter server tasks. If None, does not use '
                      'a parameter server.')
+tf.app.flags.DEFINE_boolean('norm_input', True, 'norm input [-1:1].')
+tf.app.flags.DEFINE_boolean('random_erase', False, 'random_erase input')
+tf.app.flags.DEFINE_boolean('random_crop', False, 'random_crop')
+tf.app.flags.DEFINE_boolean('random_rotate', False, 'random_rotate')
+tf.app.flags.DEFINE_boolean('random_flip', True, 'random_flip')
 
 tf.app.flags.DEFINE_float('moving_average_decay', None, 'moving_average_decay')
 
@@ -137,28 +142,97 @@ def get_split(split_name, dataset_dir, file_pattern=None, reader=None):
         items_to_descriptions=_ITEMS_TO_DESCRIPTIONS,
         num_classes=_NUM_CLASSES)
 
-def process_image(image):
-    bbox = tf.constant([0.0, 0.0, 1.0, 1.0],dtype=tf.float32,shape=[1, 1, 4])
-    sample_distorted_bounding_box = tf.image.sample_distorted_bounding_box(
-        tf.shape(image),
-        bounding_boxes=bbox,
-        min_object_covered=0.1,
-        aspect_ratio_range=(0.80, 1.20),
-        area_range=(0.80, 1.0),
-        max_attempts=100,
-        use_image_if_no_bounding_boxes=True)
-    bbox_begin, bbox_size, distort_bbox = sample_distorted_bounding_box
-    distorted_image = tf.slice(image, bbox_begin, bbox_size)
-    distorted_image.set_shape([None, None, 3])
-    distorted_image = tf.image.random_flip_left_right(distorted_image)
+def erasing(img,mean,sl,sh,r1):
+#     for attempt in range(100):
+    area = img.get_shape().as_list()[0]*img.get_shape().as_list()[1]
+    target_area = tf.squeeze(tf.random_uniform([1], minval=sl , maxval=sh, dtype=tf.float32)) * area
+    aspect_ratio = tf.squeeze(tf.random_uniform([1], minval=r1 , maxval=1.0/r1, dtype=tf.float32) )
 
-    image = tf.expand_dims(distorted_image, 0)
+    h = tf.cast(tf.round(tf.sqrt(target_area * aspect_ratio)),tf.int32)
+    w = tf.cast(tf.round(tf.sqrt(target_area / aspect_ratio)),tf.int32)
+
+    cond_h = (h < img.get_shape().as_list()[0])
+    cond_w = (w < img.get_shape().as_list()[1])
+    
+    def process(image):
+        x1 = tf.squeeze(tf.random_uniform([1], minval=0 , maxval=img.get_shape().as_list()[0]-h, dtype=tf.int32))
+        y1 = tf.squeeze(tf.random_uniform([1], minval=0 , maxval=img.get_shape().as_list()[1]-w, dtype=tf.int32))
+        shape = image.get_shape().as_list()
+        coord_w, coord_h = tf.meshgrid(tf.range(shape[1]),tf.range(shape[0]))
+        ind_w = tf.logical_and(coord_w>=y1,coord_w<y1+w)
+        ind_h = tf.logical_and(coord_h>=x1,coord_h<x1+h)
+        mask = tf.cast(tf.logical_and(ind_w,ind_h),tf.float32)
+        masks = []
+        values = []
+        for idx in range(len(mean)):
+            masks.append(mask)
+            values.append(mask*mean[idx]*255)
+        masks = tf.stack(masks,axis=2)
+        values = tf.stack(values,axis=2)
+        image = tf.multiply(1-masks,image) + values
+        return image
+        
+        
+    img = tf.cond(tf.logical_and(cond_h,cond_w),
+                  lambda: process(img),
+                  lambda: img)
+    return img
+class random_erasing(object):
+    def __init__(self, probability = 0.4, sl = 0.02, sh = 0.4, r1 = 0.3, mean=[0.5, 0.5, 0.5]):
+        self.probability = probability
+        self.mean = mean
+        self.sl = sl
+        self.sh = sh
+        self.r1 = r1
+    def __call__(self, img):
+
+        rand_num = tf.random_uniform([1], minval=0 , maxval=1, dtype=tf.float32)
+        rand_num = tf.squeeze(rand_num)
+
+        img = tf.cond(rand_num>self.probability,
+                lambda: erasing(img,self.mean,self.sl,self.sh,self.r1),
+                lambda: img)
+        return img
+def process_image(image):
+    if FLAGS.random_crop:
+        bbox = tf.constant([0.0, 0.0, 1.0, 1.0],dtype=tf.float32,shape=[1, 1, 4])
+        sample_distorted_bounding_box = tf.image.sample_distorted_bounding_box(
+            tf.shape(image),
+            bounding_boxes=bbox,
+            min_object_covered=0.1,
+            aspect_ratio_range=(0.45, 0.55),
+            area_range=(0.70, 1.0),
+            max_attempts=100,
+            use_image_if_no_bounding_boxes=True)
+        bbox_begin, bbox_size, distort_bbox = sample_distorted_bounding_box
+        
+        image_with_box = tf.image.draw_bounding_boxes(tf.expand_dims(tf.divide(tf.cast(image,tf.float32), 255), 0), distort_bbox)
+        tf.summary.image('images_with_box', image_with_box)
+        
+        image = tf.slice(image, bbox_begin, bbox_size)
+        image.set_shape([None, None, 3])
+    if FLAGS.random_flip:
+        image = tf.image.random_flip_left_right(image)
+ 
+    image = tf.expand_dims(image, 0)
     image = tf.image.resize_bilinear(image, [FLAGS.target_height, FLAGS.target_width], align_corners=False)
     image = tf.squeeze(image, [0])
-    image = tf.subtract(image, 0.5)
-    image = tf.multiply(image, 2.0)        
 
+    if FLAGS.random_erase:
+        re = random_erasing()
+        image = re(image)
+        
+    if FLAGS.random_rotate:
+        pi = 3.14
+        rand_angle = tf.random_uniform([1], minval=-pi/16, maxval=pi/16, dtype=tf.float32)
+        image = tf.contrib.image.rotate(image, rand_angle)
+        
+    if FLAGS.norm_input:
+        image = tf.divide(image, 255)
+    image = tf.subtract(image, 0.5)
+    image = tf.multiply(image, 2.0)  
     return image
+    
 def get_variables_to_restore():
     """Returns a function run by the chief worker to warm-start the training."""
 #     checkpoint_exclude_scopes=["distance-module", "InceptionV4/Logits"]
@@ -386,7 +460,13 @@ def main(_):
                 init_fn = slim.assign_from_checkpoint_fn(
                     os.path.join(FLAGS.checkpoints_dir, 'inception_v1.ckpt'),
                     slim.get_model_variables('InceptionV1'))
-                
+        if FLAGS.model=='MultiHeadAttentionBaseModel_set_share_softmax':
+            if FLAGS.weights is None:
+                # if not FLAGS.moving_average_decay:
+                variables = slim.get_model_variables('InceptionV1')
+                init_fn = slim.assign_from_checkpoint_fn(
+                    os.path.join(FLAGS.checkpoints_dir, 'inception_v1.ckpt'),
+                    slim.get_model_variables('InceptionV1'))          
         if FLAGS.model=='CoAttentionBaseModel_v2':
             if FLAGS.weights is None:
                 # if not FLAGS.moving_average_decay:

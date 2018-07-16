@@ -8,7 +8,11 @@ from tensorflow.contrib import slim
 from core import models
 FLAGS = tf.app.flags.FLAGS
 import os
+from sklearn.metrics import average_precision_score
 
+tf.app.flags.DEFINE_integer('start_id',0, '')
+tf.app.flags.DEFINE_integer('end_id',3368, '')
+FLAGS = tf.app.flags.FLAGS
 
 def find_class_by_name(name, modules):
     """Searches the provided modules for the named class and returns it."""
@@ -232,8 +236,8 @@ def calCMC(set_no,rand_times=10):
     with tf.Graph().as_default() as graph_match:
         tf_global_step = slim.get_or_create_global_step()
         
-        feature_map_a = tf.placeholder(dtype=tf.float32,shape=(FLAGS.batch_size, 14, 7, 256))
-        feature_map_b = tf.placeholder(dtype=tf.float32,shape=(FLAGS.batch_size, 14, 7, 256))
+        feature_map_a = tf.placeholder(dtype=tf.float32,shape=(FLAGS.batch_size, 14, 7, FLAGS.feature_dim))
+        feature_map_b = tf.placeholder(dtype=tf.float32,shape=(FLAGS.batch_size, 14, 7, FLAGS.feature_dim))
         model = find_class_by_name(FLAGS.model_match, [models])()
 
         logits_match = model.create_model(feature_map_a,feature_map_b, reuse=False, is_training = False) 
@@ -257,13 +261,14 @@ def calCMC(set_no,rand_times=10):
     testImages = []
     for filename in file_list_a:
         if filename[-3:]=='jpg':
-            testImages.append(DATA_DIR + filename)
-            if filename[0]=='-':
-                testID_list.append(-1)
-                testCAM_list.append(int(filename[4]))
-            else:
+            
+            if not filename[0]=='-':
+#                 testID_list.append(-1)
+#                 testCAM_list.append(int(filename[4]))
+#             else:
                 testID_list.append(int(filename[0:4]))
                 testCAM_list.append(int(filename[6]))
+                testImages.append(DATA_DIR + filename)
     assert len(testID_list)==len(testCAM_list)
     assert len(testCAM_list)==len(testImages)
     
@@ -275,10 +280,10 @@ def calCMC(set_no,rand_times=10):
     for filename in file_list_b:
         if filename[-3:]=='jpg':
             queryImages.append(DATA_DIR_query + filename)
-            if filename[0]=='-':
-                queryID_list.append(-1)
-                queryCAM_list.append(int(filename[4]))
-            else:
+            if not filename[0]=='-':
+#                 queryID_list.append(-1)
+#                 queryCAM_list.append(int(filename[4]))
+#             else:
                 queryID_list.append(int(filename[0:4]))
                 queryCAM_list.append(int(filename[6]))
     assert len(queryCAM_list)==len(queryID_list)
@@ -312,13 +317,22 @@ def calCMC(set_no,rand_times=10):
     # match over queries
     hit = 0
     total = 0
-    for queryIdx in range(len(queryImages)):
+    aps = []
+    start = FLAGS.start_id
+    end = FLAGS.end_id
+    test_num = end - start
+    for testIdx in range(test_num):
+        
+        queryIdx = testIdx + start
         this_score_list = []
 #         print(queryImages[queryIdx])
         query_feature = queryFeature_list[queryIdx]
         num_batches = int(np.ceil((len(testImages)*1.0)/FLAGS.batch_size))
         max_Idx = 0
         max_value = -10
+        y_true = []
+        y_score = []
+        
         for batchIdx in range(num_batches):
             gallery_features_list = testFeature_list[batchIdx*FLAGS.batch_size:(batchIdx+1)*FLAGS.batch_size]
             gallery_features = np.stack(gallery_features_list,axis=0)
@@ -331,12 +345,13 @@ def calCMC(set_no,rand_times=10):
                 
             [scores] = sess_match.run([logits_match],feed_dict={feature_map_a :np.tile(np.asarray([query_feature]),[FLAGS.batch_size,1,1,1]), feature_map_b:gallery_features_pad})
             
-
-            
             for Idx in range(len(gallery_features_list)):
                 this_score_list.append(scores[Idx,0])
-                if scores[Idx,0] > max_value:
-                    if queryCAM_list[queryIdx]!=testCAM_list[batchIdx*FLAGS.batch_size+Idx] and testID_list[batchIdx*FLAGS.batch_size+Idx]!=-1:
+                valid = ((queryCAM_list[queryIdx]!=testCAM_list[batchIdx*FLAGS.batch_size+Idx]) | (queryID_list[queryIdx]!=testID_list[batchIdx*FLAGS.batch_size+Idx])) and testID_list[batchIdx*FLAGS.batch_size+Idx]!=-1
+                if valid:
+                    y_true.append(testID_list[batchIdx*FLAGS.batch_size+Idx]==queryID_list[queryIdx])
+                    y_score.append(scores[Idx,0])
+                    if scores[Idx,0] > max_value:
                         max_Idx = batchIdx*FLAGS.batch_size+Idx
                         max_value = scores[Idx,0]
 #         print(max_value)
@@ -345,9 +360,12 @@ def calCMC(set_no,rand_times=10):
         if (testID_list[max_Idx]==queryID_list[queryIdx]):
             hit+=1
         total+=1
-        sys.stdout.write('\r%d/%d, %.4f'%(total,len(queryImages),hit*1.0/total))
-        sys.stdout.flush()
-        
+        aps.append(average_precision_score(np.asarray(y_true), np.asarray(y_score)))
+#         print(len(y_true))
+#         sys.stdout.write('\r%d/%d, top-1: %.4f, mAP: %.4f'%(total,len(queryImages),hit*1.0/total,np.mean(aps)))
+#         sys.stdout.flush()
+        print('\r%d/%d, top-1: %.6f, mAP: %.6f'%(total,test_num,hit*1.0/total,np.mean(aps)))
+#         assert False
 #         print(total,hit*1.0/total)
 #         assert False
     

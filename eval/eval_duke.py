@@ -8,7 +8,11 @@ from tensorflow.contrib import slim
 from core import models
 FLAGS = tf.app.flags.FLAGS
 import os
+from sklearn.metrics import average_precision_score
 
+tf.app.flags.DEFINE_integer('start_id',0, '')
+tf.app.flags.DEFINE_integer('end_id',100, '')
+FLAGS = tf.app.flags.FLAGS
 
 def find_class_by_name(name, modules):
     """Searches the provided modules for the named class and returns it."""
@@ -232,8 +236,8 @@ def calCMC(set_no,rand_times=10):
     with tf.Graph().as_default() as graph_match:
         tf_global_step = slim.get_or_create_global_step()
         
-        feature_map_a = tf.placeholder(dtype=tf.float32,shape=(FLAGS.batch_size, 14, 7, 256))
-        feature_map_b = tf.placeholder(dtype=tf.float32,shape=(FLAGS.batch_size, 14, 7, 256))
+        feature_map_a = tf.placeholder(dtype=tf.float32,shape=(FLAGS.batch_size, 14, 7, FLAGS.feature_dim))
+        feature_map_b = tf.placeholder(dtype=tf.float32,shape=(FLAGS.batch_size, 14, 7, FLAGS.feature_dim))
         model = find_class_by_name(FLAGS.model_match, [models])()
 
         logits_match = model.create_model(feature_map_a,feature_map_b, reuse=False, is_training = False) 
@@ -312,13 +316,23 @@ def calCMC(set_no,rand_times=10):
     # match over queries
     hit = 0
     total = 0
-    for queryIdx in range(len(queryImages)):
+    aps = []
+    start = FLAGS.start_id
+    end = FLAGS.end_id
+    test_num = end - start
+    
+    for testIdx in range(test_num):
+        queryIdx = testIdx + start
+        
         this_score_list = []
 #         print(queryImages[queryIdx])
         query_feature = queryFeature_list[queryIdx]
         num_batches = int(np.ceil((len(testImages)*1.0)/FLAGS.batch_size))
         max_Idx = 0
         max_value = -10
+        y_true = []
+        y_score = []
+        
         for batchIdx in range(num_batches):
             gallery_features_list = testFeature_list[batchIdx*FLAGS.batch_size:(batchIdx+1)*FLAGS.batch_size]
             gallery_features = np.stack(gallery_features_list,axis=0)
@@ -335,8 +349,11 @@ def calCMC(set_no,rand_times=10):
             
             for Idx in range(len(gallery_features_list)):
                 this_score_list.append(scores[Idx,0])
-                if scores[Idx,0] > max_value:
-                    if queryCAM_list[queryIdx]!=testCAM_list[batchIdx*FLAGS.batch_size+Idx] and testID_list[batchIdx*FLAGS.batch_size+Idx]!=-1:
+                valid = ((queryCAM_list[queryIdx]!=testCAM_list[batchIdx*FLAGS.batch_size+Idx]) | (queryID_list[queryIdx]!=testID_list[batchIdx*FLAGS.batch_size+Idx])) and testID_list[batchIdx*FLAGS.batch_size+Idx]!=-1
+                if valid:
+                    y_true.append(testID_list[batchIdx*FLAGS.batch_size+Idx]==queryID_list[queryIdx])
+                    y_score.append(scores[Idx,0])
+                    if scores[Idx,0] > max_value:
                         max_Idx = batchIdx*FLAGS.batch_size+Idx
                         max_value = scores[Idx,0]
 #         print(max_value)
@@ -345,8 +362,10 @@ def calCMC(set_no,rand_times=10):
         if (testID_list[max_Idx]==queryID_list[queryIdx]):
             hit+=1
         total+=1
-        sys.stdout.write('\r%d/%d, %.4f'%(total,len(queryImages),hit*1.0/total))
-        sys.stdout.flush()
+        aps.append(average_precision_score(np.asarray(y_true), np.asarray(y_score)))
+        print('\r%d/%d, top-1: %.6f, mAP: %.6f'%(total,test_num,hit*1.0/total,np.mean(aps)))
+#         sys.stdout.write('\r%d/%d, %.4f'%(total,len(queryImages),hit*1.0/total))
+#         sys.stdout.flush()
         
 #         print(total,hit*1.0/total)
 #         assert False

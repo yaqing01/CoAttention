@@ -74,6 +74,7 @@ flags.DEFINE_float('last_layer_gradient_multiplier', 1,
                    'The gradient multiplier for last layers, which is used to '
                    'boost the gradient of last layers if the value > 1.')
 tf.app.flags.DEFINE_integer('top_k', 10, '')
+tf.app.flags.DEFINE_integer('num_images', 10, '')
 
 FLAGS = tf.app.flags.FLAGS
 
@@ -82,7 +83,7 @@ os.environ["CUDA_VISIBLE_DEVICES"]=FLAGS.gpu_id
 _FILE_PATTERN = '%s-*'
 
 _SPLITS_TO_SIZES = {
-    'train': 1252200,
+    'train': 125220,
 }
 
 _ITEMS_TO_DESCRIPTIONS = {
@@ -125,7 +126,7 @@ def get_split(split_name, dataset_dir, file_pattern=None, reader=None):
 
     keys_to_features = {
       'image/encoded_a': tf.FixedLenFeature((), tf.string),
-      'image/encoded_b': tf.FixedLenFeature((10,), tf.string),
+      'image/encoded_b': tf.FixedLenFeature((FLAGS.num_images,), tf.string),
       'image/format': tf.FixedLenFeature((), tf.string, default_value='jpeg'),
       'image/label': tf.FixedLenFeature((), dtype=tf.int64),
     }
